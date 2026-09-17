@@ -58,6 +58,16 @@
 - 症状对照：`Unsupported class file major version 69` = 拿 JDK 25 跑了旧 Gradle；`No matching toolchains found` = 本机缺对应 JDK。
 - 不要在 `gradle.properties` 里写死 `org.gradle.java.home` 的绝对路径，换机器或换 CI 会直接失效。
 
+## 构建网络（本机环境）
+
+本机的 Java 不读取 Windows 系统代理（WinINET 里配的是 `127.0.0.1:7897`），直连 `libraries.minecraft.net`、`resources.download.minecraft.net`、`maven.minecraftforge.net` 会超时。**需要联网的构建步骤**（首次 setup、`runServer` 首次下载资源与语言文件）必须显式把代理传给 JVM：
+
+```powershell
+$env:JAVA_TOOL_OPTIONS='-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=7897 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=7897 -Dhttp.nonProxyHosts=localhost|127.0.0.1'
+```
+
+缓存暖起来之后 `gradlew build` 不联网也能跑通。**不要把代理写进 `gradle.properties` 提交**——那是本机环境，换机器或 CI 就失效。
+
 ## 行为契约（三条分支必须一致）
 
 1. 生物死亡不掉经验球，包括末影龙与凋灵。
