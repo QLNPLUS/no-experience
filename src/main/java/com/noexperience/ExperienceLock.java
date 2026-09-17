@@ -4,12 +4,12 @@ import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.player.Player;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.living.LivingExperienceDropEvent;
-import net.minecraftforge.event.entity.player.PlayerXpEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.entity.living.LivingExperienceDropEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerXpEvent;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
 /**
  * Gameplay half of the mod. Every experience source is closed off, and a per-tick fallback keeps
@@ -25,10 +25,10 @@ import net.minecraftforge.fml.common.Mod;
  *     <li>any orb that still tries to enter a level, including orbs loaded from an old save
  *         ({@link EntityJoinLevelEvent});</li>
  *     <li>anything that writes the experience fields behind the mod's back, covered by the tick
- *         fallback in {@link #onPlayerTick(TickEvent.PlayerTickEvent)}.</li>
+ *         fallback in {@link #onPlayerTick(PlayerTickEvent.Post)}.</li>
  * </ul>
  */
-@Mod.EventBusSubscriber(modid = NoExperience.MOD_ID)
+@EventBusSubscriber(modid = NoExperience.MOD_ID)
 public final class ExperienceLock {
     private ExperienceLock() {}
 
@@ -72,8 +72,8 @@ public final class ExperienceLock {
 
     /** Fallback lock: whatever wrote to the experience fields, it is zero again by the end of the tick. */
     @SubscribeEvent
-    public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
-        if (event.phase == TickEvent.Phase.END && event.player instanceof ServerPlayer serverPlayer) {
+    public static void onPlayerTick(PlayerTickEvent.Post event) {
+        if (event.getEntity() instanceof ServerPlayer serverPlayer) {
             lockToZero(serverPlayer);
         }
     }

@@ -1,26 +1,27 @@
 package com.noexperience.client;
 
 import com.noexperience.NoExperience;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.RenderGuiOverlayEvent;
-import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.minecraft.resources.ResourceLocation;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;
+import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
 
 /**
  * Client half of the mod: the experience bar is never drawn.
  *
- * <p>On 1.20.1 the whole bar (background, progress and the level number) is rendered by the
- * {@code experience_bar} overlay, so cancelling that one overlay hides all of it. The jump bar
- * while riding a horse stays untouched.
+ * <p>On 1.21.1 the bar and the level number are two separate HUD layers, so both are cancelled.
+ * The jump meter layer of a ridden horse stays untouched.
  */
-@Mod.EventBusSubscriber(modid = NoExperience.MOD_ID, value = Dist.CLIENT)
+@EventBusSubscriber(modid = NoExperience.MOD_ID, value = Dist.CLIENT)
 public final class ClientExperienceHud {
     private ClientExperienceHud() {}
 
     @SubscribeEvent
-    public static void onRenderGuiOverlay(RenderGuiOverlayEvent.Pre event) {
-        if (VanillaGuiOverlay.EXPERIENCE_BAR.id().equals(event.getOverlay().id())) {
+    public static void onRenderGuiLayer(RenderGuiLayerEvent.Pre event) {
+        ResourceLocation name = event.getName();
+        if (VanillaGuiLayers.EXPERIENCE_BAR.equals(name) || VanillaGuiLayers.EXPERIENCE_LEVEL.equals(name)) {
             event.setCanceled(true);
         }
     }
