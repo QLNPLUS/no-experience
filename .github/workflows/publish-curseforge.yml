@@ -12,6 +12,8 @@ name: Publish to CurseForge
 # Publishing one release therefore uploads one loader. A bare version tag (v1.0.0) run by hand
 # publishes all three at once, each job building its own branch head.
 #
+# The release must be published, not left as a draft: a draft release does not fire the event.
+#
 # Required repository configuration (Settings > Secrets and variables > Actions):
 #   Variable CURSEFORGE_PROJECT_ID - numeric CurseForge project id
 #   Secret   CURSEFORGE_TOKEN      - CurseForge API token
