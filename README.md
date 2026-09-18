@@ -52,6 +52,12 @@ cd D:\projects\no_experience\neoforge-1.26.1.2
 
 跨版本改动一律用 `git cherry-pick -x`，不要手工重写；分支矩阵与迁移纪律见 `AGENTS.md`。
 
+## 下载
+
+发布版见 GitHub Releases，tag 格式为 `v<版本>-<加载器>-<mc版本>`（例如 `v1.0.0-forge-1.20.1`），每个 tag 对应一条版本分支的构建产物。CurseForge 项目页有同样的文件。
+
 ## 许可
 
-All Rights Reserved。详见 `LICENSE`。
+MIT，详见 `LICENSE`。整合包可以自由收录，保留版权声明即可。
+
+Minecraft 是 Mojang Synergies AB 的商标，本项目与 Mojang / Microsoft 无隶属关系。
