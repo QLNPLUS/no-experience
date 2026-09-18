@@ -54,7 +54,12 @@ cd D:\projects\no_experience\neoforge-1.26.1.2
 
 ## 下载
 
-发布版见 GitHub Releases，tag 格式为 `v<版本>-<加载器>-<mc版本>`（例如 `v1.0.0-forge-1.20.1`），每个 tag 对应一条版本分支的构建产物。CurseForge 项目页有同样的文件。
+| 渠道 | 地址 |
+|---|---|
+| CurseForge | <https://www.curseforge.com/minecraft/mc-mods/no-experience> |
+| GitHub Releases | <https://github.com/QLNPLUS/no-experience/releases> |
+
+GitHub 的 tag 格式为 `v<版本>-<加载器>-<mc版本>`（例如 `v1.0.0-forge-1.20.1`），每个 tag 对应一条版本分支的构建产物；CurseForge 上是同样的三个文件，按加载器与 MC 版本区分。
 
 ## 许可
 
