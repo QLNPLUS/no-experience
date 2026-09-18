@@ -1,0 +1,606 @@
+name: Publish to CurseForge
+
+# One workflow serves all three version branches.
+#
+# GitHub only runs a `release` workflow from the default branch, so this file is committed to
+# every branch with identical content and decides what to build from the release tag itself:
+#
+#   v1.0.0-forge-1.20.1      -> branch forge-1.20.1      -> Forge 47.x      / Java 17
+#   v1.0.0-neoforge-1.21.1   -> branch neoforge-1.21.1   -> NeoForge 21.1.x / Java 21
+#   v1.0.0-neoforge-26.1.2   -> branch neoforge-1.26.1.2 -> NeoForge 26.1.x / Java 25
+#
+# Publishing one release therefore uploads one loader. A bare version tag (v1.0.0) run by hand
+# publishes all three at once, each job building its own branch head.
+#
+# Required repository configuration (Settings > Secrets and variables > Actions):
+#   Variable CURSEFORGE_PROJECT_ID - numeric CurseForge project id
+#   Secret   CURSEFORGE_TOKEN      - CurseForge API token
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag: v1.0.0-forge-1.20.1, v1.0.0-neoforge-1.21.1, v1.0.0-neoforge-26.1.2, or a bare v1.0.0 for all three"
+        required: true
+        type: string
+      loader:
+        description: "Which job(s) to run. 'auto' follows the tag; the rest retry a single job."
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - forge
+          - neoforge
+          - neoforge-126
+      version_type:
+        description: "Release channel the version is filed under"
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - beta
+          - alpha
+
+permissions:
+  contents: write
+
+# Serialize uploads that share a version, so a second manual run cannot add a duplicate file
+# while the first one is still uploading. Never cancel: a cancelled run may leave a partial file.
+concurrency:
+  group: curseforge-${{ github.repository }}-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      version_type: ${{ steps.plan.outputs.version_type }}
+      run_forge: ${{ steps.plan.outputs.run_forge }}
+      run_neoforge: ${{ steps.plan.outputs.run_neoforge }}
+      run_neoforge126: ${{ steps.plan.outputs.run_neoforge126 }}
+      ref_forge: ${{ steps.plan.outputs.ref_forge }}
+      ref_neoforge: ${{ steps.plan.outputs.ref_neoforge }}
+      ref_neoforge126: ${{ steps.plan.outputs.ref_neoforge126 }}
+    steps:
+      - name: Plan the publish
+        id: plan
+        env:
+          TAG_INPUT: ${{ github.event.release.tag_name || inputs.tag }}
+          SELECTOR: ${{ inputs.loader || 'auto' }}
+          VERSION_TYPE_INPUT: ${{ inputs.version_type || 'release' }}
+        run: |
+          set -euo pipefail
+
+          tag="$(printf '%s' "${TAG_INPUT:-}" | tr -d '[:space:]')"
+          selector="${SELECTOR:-auto}"
+          version_type="${VERSION_TYPE_INPUT:-release}"
+
+          case "$selector" in
+            auto|forge|neoforge|neoforge-126) ;;
+            *) echo "::error::Unknown loader selector '$selector'."; exit 1 ;;
+          esac
+          case "$version_type" in
+            release|beta|alpha) ;;
+            *) echo "::error::Unknown version type '$version_type'."; exit 1 ;;
+          esac
+          if [ -z "$tag" ]; then
+            echo "::error::No tag to publish. A release event carries one; a manual run needs the 'tag' input."
+            exit 1
+          fi
+
+          # Split v1.0.0-forge-1.20.1 into version / loader / Minecraft version.
+          # The neoforge pattern is tested first: "1.0.0-neoforge-1.21.1" also matches "*-forge-*".
+          body="${tag#v}"
+          tag_loader=""
+          mc=""
+          version="$body"
+          case "$body" in
+            *-neoforge-*)
+              tag_loader="neoforge"
+              mc="${body##*-neoforge-}"
+              version="${body%-neoforge-${mc}}"
+              ;;
+            *-forge-*)
+              tag_loader="forge"
+              mc="${body##*-forge-}"
+              version="${body%-forge-${mc}}"
+              ;;
+          esac
+          if [ -z "$version" ]; then
+            echo "::error::Could not read a version out of the tag '$tag'."
+            exit 1
+          fi
+
+          # Which single job does the tag name? Empty for a bare version tag.
+          tag_job=""
+          if [ "$tag_loader" = "forge" ]; then
+            tag_job="forge"
+          elif [ "$tag_loader" = "neoforge" ]; then
+            case "$mc" in
+              1.21.1) tag_job="neoforge" ;;
+              26.1.2) tag_job="neoforge-126" ;;
+              *)
+                echo "::error::Tag '$tag' names NeoForge Minecraft version '$mc', which this repository does not build. Use one of the three tags listed in the workflow comments."
+                exit 1
+                ;;
+            esac
+          fi
+
+          run_forge=false
+          run_neoforge=false
+          run_neoforge126=false
+
+          if [ "$selector" = "auto" ]; then
+            if [ -n "$tag_job" ]; then
+              case "$tag_job" in
+                forge) run_forge=true ;;
+                neoforge) run_neoforge=true ;;
+                neoforge-126) run_neoforge126=true ;;
+              esac
+            else
+              # Bare version tag: publish every loader, one job per version branch.
+              run_forge=true
+              run_neoforge=true
+              run_neoforge126=true
+              echo "::notice::Bare tag '$tag' selects all three loaders; each job builds the head of its own branch."
+            fi
+          else
+            if [ -n "$tag_job" ] && [ "$tag_job" != "$selector" ]; then
+              echo "::warning::Tag '$tag' names '$tag_job', but the manual selector forced '$selector'."
+            fi
+            case "$selector" in
+              forge) run_forge=true ;;
+              neoforge) run_neoforge=true ;;
+              neoforge-126) run_neoforge126=true ;;
+            esac
+          fi
+
+          # A job builds the release tag when the tag belongs to it, and its branch head otherwise
+          # (bare version tags exist on the default branch only, so they cannot serve the others).
+          ref_forge="forge-1.20.1"
+          ref_neoforge="neoforge-1.21.1"
+          ref_neoforge126="neoforge-1.26.1.2"
+          if [ "$tag_job" = "forge" ]; then
+            ref_forge="refs/tags/$tag"
+          elif [ "$tag_job" = "neoforge" ]; then
+            ref_neoforge="refs/tags/$tag"
+          elif [ "$tag_job" = "neoforge-126" ]; then
+            ref_neoforge126="refs/tags/$tag"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "version_type=$version_type"
+            echo "run_forge=$run_forge"
+            echo "run_neoforge=$run_neoforge"
+            echo "run_neoforge126=$run_neoforge126"
+            echo "ref_forge=$ref_forge"
+            echo "ref_neoforge=$ref_neoforge"
+            echo "ref_neoforge126=$ref_neoforge126"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release plan"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Tag | \`$tag\` |"
+            echo "| Version | \`$version\` |"
+            echo "| Version type | \`$version_type\` |"
+            echo "| forge-1.20.1 | $run_forge (\`$ref_forge\`) |"
+            echo "| neoforge-1.21.1 | $run_neoforge (\`$ref_neoforge\`) |"
+            echo "| neoforge-1.26.1.2 | $run_neoforge126 (\`$ref_neoforge126\`) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-forge:
+    name: Publish Forge 1.20.1
+    needs: resolve
+    if: needs.resolve.outputs.run_forge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ${{ needs.resolve.outputs.ref_forge }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.ref_forge }}
+
+      # java.toolchain targets 17, gradle/gradle-daemon-jvm.properties pins the Gradle JVM to 21.
+      # Gradle 8.8 cannot host Java 25, so both JDKs are installed and the 17 toolchain is
+      # pointed at explicitly instead of being downloaded from Foojay.
+      - name: Set up JDK 17 (compile toolchain)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up JDK 21 (Gradle JVM)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Check the repository configuration
+        env:
+          CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CURSEFORGE_PROJECT_ID:-}" ]; then
+            echo "::error::Repository variable CURSEFORGE_PROJECT_ID is not set (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+          if [ -z "${CURSEFORGE_TOKEN:-}" ]; then
+            echo "::error::Repository secret CURSEFORGE_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
+            exit 1
+          fi
+          echo "Using CurseForge project id $CURSEFORGE_PROJECT_ID."
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          args=(build --no-daemon --no-build-cache --stacktrace)
+          if [ -n "${JAVA_HOME_17_X64:-}" ]; then
+            args+=("-Dorg.gradle.java.installations.paths=$JAVA_HOME_17_X64")
+          fi
+          ./gradlew "${args[@]}"
+
+      - name: Check the release artifact
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="build/libs/no_experience-forge-1.20.1-${VERSION}.jar"
+          echo "--- build/libs ---"
+          find build/libs -maxdepth 1 -type f -name '*.jar' -print
+          if [ ! -f "$expected" ]; then
+            echo "::error::Expected artifact '$expected' was not built. Tag '${{ needs.resolve.outputs.tag }}' names version '$VERSION', so gradle.properties on this branch must carry mod_version=$VERSION."
+            exit 1
+          fi
+          if ! unzip -p "$expected" pack.mcmeta > /dev/null; then
+            echo "::error::pack.mcmeta is missing from the root of $expected."
+            exit 1
+          fi
+          if ! unzip -p "$expected" META-INF/mods.toml > mod-metadata.toml; then
+            echo "::error::META-INF/mods.toml is missing from $expected."
+            exit 1
+          fi
+          if grep -q '\${' mod-metadata.toml; then
+            echo "::error::An unexpanded \${...} placeholder is still present in META-INF/mods.toml."
+            exit 1
+          fi
+          echo "--- META-INF/mods.toml ---"
+          head -20 mod-metadata.toml
+
+      - name: Extract the ${{ needs.resolve.outputs.version }} changelog section
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            /^##[[:space:]]/ {
+              if (inside) { exit }
+              heading = $0
+              sub(/^##[[:space:]]+/, "", heading)
+              sub(/[[:space:]]+$/, "", heading)
+              if (heading == ver || index(heading, "[" ver "]") == 1) { inside = 1 }
+              next
+            }
+            inside { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## $VERSION' section. Add one before publishing."
+            exit 1
+          fi
+          echo "--- changelog-section.md ---"
+          cat changelog-section.md
+
+      - name: Publish to CurseForge and GitHub Releases
+        id: publish
+        uses: Kira-NT/mc-publish@v3
+        with:
+          curseforge-id: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          curseforge-token: ${{ secrets.CURSEFORGE_TOKEN }}
+
+          github-tag: ${{ needs.resolve.outputs.tag }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-commitish: forge-1.20.1
+
+          name: No Experience ${{ needs.resolve.outputs.version }} (Forge 1.20.1)
+          version: ${{ needs.resolve.outputs.version }}
+          version-type: ${{ needs.resolve.outputs.version_type }}
+
+          files: build/libs/no_experience-forge-1.20.1-${{ needs.resolve.outputs.version }}.jar
+          loaders: forge
+          game-versions: '1.20.1'
+          game-version-filter: none
+
+          changelog-file: changelog-section.md
+          retry-attempts: 2
+          retry-delay: 10000
+          fail-mode: fail
+
+      - name: Summarize
+        if: always()
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CF_URL: ${{ steps.publish.outputs.curseforge-url }}
+          GH_URL: ${{ steps.publish.outputs.github-url }}
+        run: |
+          {
+            echo "### No Experience ${VERSION} — Forge 1.20.1"
+            echo
+            echo "- CurseForge: ${CF_URL:-not published}"
+            echo "- GitHub release: ${GH_URL:-not published}"
+            echo
+            echo "A CurseForge upload that reported success can stay out of the public file list for several minutes while it is under review. Do not retry on that basis."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-neoforge:
+    name: Publish NeoForge 1.21.1
+    needs: resolve
+    if: needs.resolve.outputs.run_neoforge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ${{ needs.resolve.outputs.ref_neoforge }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.ref_neoforge }}
+
+      - name: Set up JDK 21 (compile toolchain and Gradle JVM)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Check the repository configuration
+        env:
+          CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CURSEFORGE_PROJECT_ID:-}" ]; then
+            echo "::error::Repository variable CURSEFORGE_PROJECT_ID is not set (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+          if [ -z "${CURSEFORGE_TOKEN:-}" ]; then
+            echo "::error::Repository secret CURSEFORGE_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
+            exit 1
+          fi
+          echo "Using CurseForge project id $CURSEFORGE_PROJECT_ID."
+
+      - name: Build
+        run: ./gradlew build --no-daemon --no-build-cache --stacktrace
+
+      - name: Check the release artifact
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="build/libs/no_experience-neoforge-1.21.1-${VERSION}.jar"
+          echo "--- build/libs ---"
+          find build/libs -maxdepth 1 -type f -name '*.jar' -print
+          if [ ! -f "$expected" ]; then
+            echo "::error::Expected artifact '$expected' was not built. Tag '${{ needs.resolve.outputs.tag }}' names version '$VERSION', so gradle.properties on this branch must carry mod_version=$VERSION."
+            exit 1
+          fi
+          if ! unzip -p "$expected" pack.mcmeta > /dev/null; then
+            echo "::error::pack.mcmeta is missing from the root of $expected."
+            exit 1
+          fi
+          if ! unzip -p "$expected" META-INF/neoforge.mods.toml > mod-metadata.toml; then
+            echo "::error::META-INF/neoforge.mods.toml is missing from $expected."
+            exit 1
+          fi
+          if grep -q '\${' mod-metadata.toml; then
+            echo "::error::An unexpanded \${...} placeholder is still present in META-INF/neoforge.mods.toml."
+            exit 1
+          fi
+          echo "--- META-INF/neoforge.mods.toml ---"
+          head -20 mod-metadata.toml
+
+      - name: Extract the ${{ needs.resolve.outputs.version }} changelog section
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            /^##[[:space:]]/ {
+              if (inside) { exit }
+              heading = $0
+              sub(/^##[[:space:]]+/, "", heading)
+              sub(/[[:space:]]+$/, "", heading)
+              if (heading == ver || index(heading, "[" ver "]") == 1) { inside = 1 }
+              next
+            }
+            inside { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## $VERSION' section. Add one before publishing."
+            exit 1
+          fi
+          echo "--- changelog-section.md ---"
+          cat changelog-section.md
+
+      - name: Publish to CurseForge and GitHub Releases
+        id: publish
+        uses: Kira-NT/mc-publish@v3
+        with:
+          curseforge-id: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          curseforge-token: ${{ secrets.CURSEFORGE_TOKEN }}
+
+          github-tag: ${{ needs.resolve.outputs.tag }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-commitish: neoforge-1.21.1
+
+          name: No Experience ${{ needs.resolve.outputs.version }} (NeoForge 1.21.1)
+          version: ${{ needs.resolve.outputs.version }}
+          version-type: ${{ needs.resolve.outputs.version_type }}
+
+          files: build/libs/no_experience-neoforge-1.21.1-${{ needs.resolve.outputs.version }}.jar
+          loaders: neoforge
+          game-versions: '1.21.1'
+          game-version-filter: none
+
+          changelog-file: changelog-section.md
+          retry-attempts: 2
+          retry-delay: 10000
+          fail-mode: fail
+
+      - name: Summarize
+        if: always()
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CF_URL: ${{ steps.publish.outputs.curseforge-url }}
+          GH_URL: ${{ steps.publish.outputs.github-url }}
+        run: |
+          {
+            echo "### No Experience ${VERSION} — NeoForge 1.21.1"
+            echo
+            echo "- CurseForge: ${CF_URL:-not published}"
+            echo "- GitHub release: ${GH_URL:-not published}"
+            echo
+            echo "A CurseForge upload that reported success can stay out of the public file list for several minutes while it is under review. Do not retry on that basis."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-neoforge-126:
+    name: Publish NeoForge 26.1.2
+    needs: resolve
+    if: needs.resolve.outputs.run_neoforge126 == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ${{ needs.resolve.outputs.ref_neoforge126 }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.ref_neoforge126 }}
+
+      - name: Set up JDK 25 (compile toolchain and Gradle JVM)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Check the repository configuration
+        env:
+          CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CURSEFORGE_PROJECT_ID:-}" ]; then
+            echo "::error::Repository variable CURSEFORGE_PROJECT_ID is not set (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+          if [ -z "${CURSEFORGE_TOKEN:-}" ]; then
+            echo "::error::Repository secret CURSEFORGE_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
+            exit 1
+          fi
+          echo "Using CurseForge project id $CURSEFORGE_PROJECT_ID."
+
+      - name: Build
+        run: ./gradlew build --no-daemon --no-build-cache --stacktrace
+
+      - name: Check the release artifact
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="build/libs/no_experience-neoforge-26.1.2-${VERSION}.jar"
+          echo "--- build/libs ---"
+          find build/libs -maxdepth 1 -type f -name '*.jar' -print
+          if [ ! -f "$expected" ]; then
+            echo "::error::Expected artifact '$expected' was not built. Tag '${{ needs.resolve.outputs.tag }}' names version '$VERSION', so gradle.properties on this branch must carry mod_version=$VERSION."
+            exit 1
+          fi
+          if ! unzip -p "$expected" pack.mcmeta > /dev/null; then
+            echo "::error::pack.mcmeta is missing from the root of $expected."
+            exit 1
+          fi
+          if ! unzip -p "$expected" META-INF/neoforge.mods.toml > mod-metadata.toml; then
+            echo "::error::META-INF/neoforge.mods.toml is missing from $expected."
+            exit 1
+          fi
+          if grep -q '\${' mod-metadata.toml; then
+            echo "::error::An unexpanded \${...} placeholder is still present in META-INF/neoforge.mods.toml."
+            exit 1
+          fi
+          echo "--- META-INF/neoforge.mods.toml ---"
+          head -20 mod-metadata.toml
+
+      - name: Extract the ${{ needs.resolve.outputs.version }} changelog section
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            /^##[[:space:]]/ {
+              if (inside) { exit }
+              heading = $0
+              sub(/^##[[:space:]]+/, "", heading)
+              sub(/[[:space:]]+$/, "", heading)
+              if (heading == ver || index(heading, "[" ver "]") == 1) { inside = 1 }
+              next
+            }
+            inside { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## $VERSION' section. Add one before publishing."
+            exit 1
+          fi
+          echo "--- changelog-section.md ---"
+          cat changelog-section.md
+
+      - name: Publish to CurseForge and GitHub Releases
+        id: publish
+        uses: Kira-NT/mc-publish@v3
+        with:
+          curseforge-id: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          curseforge-token: ${{ secrets.CURSEFORGE_TOKEN }}
+
+          github-tag: ${{ needs.resolve.outputs.tag }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-commitish: neoforge-1.26.1.2
+
+          name: No Experience ${{ needs.resolve.outputs.version }} (NeoForge 26.1.2)
+          version: ${{ needs.resolve.outputs.version }}
+          version-type: ${{ needs.resolve.outputs.version_type }}
+
+          files: build/libs/no_experience-neoforge-26.1.2-${{ needs.resolve.outputs.version }}.jar
+          loaders: neoforge
+          game-versions: '26.1.2'
+          game-version-filter: none
+
+          changelog-file: changelog-section.md
+          retry-attempts: 2
+          retry-delay: 10000
+          fail-mode: fail
+
+      - name: Summarize
+        if: always()
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CF_URL: ${{ steps.publish.outputs.curseforge-url }}
+          GH_URL: ${{ steps.publish.outputs.github-url }}
+        run: |
+          {
+            echo "### No Experience ${VERSION} — NeoForge 26.1.2"
+            echo
+            echo "- CurseForge: ${CF_URL:-not published}"
+            echo "- GitHub release: ${GH_URL:-not published}"
+            echo
+            echo "A CurseForge upload that reported success can stay out of the public file list for several minutes while it is under review. Do not retry on that basis."
+          } >> "$GITHUB_STEP_SUMMARY"
