@@ -1,0 +1,7 @@
+# Line endings the Gradle wrapper depends on.
+#
+# ./gradlew is executed by /bin/sh on Linux and macOS. A CRLF shebang fails there with
+# "cannot execute: required file not found" (exit code 127), and a missing executable bit
+# fails with exit code 126. Both only show up in CI, never on Windows, which runs gradlew.bat.
+gradlew text eol=lf
+*.sh text eol=lf
