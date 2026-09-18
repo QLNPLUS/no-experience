@@ -12,7 +12,7 @@
 
 - **主工作树**（持有 `.git` 目录）：`D:\projects\no_experience\forge-1.20.1`，分支 `forge-1.20.1`。另外两个是 linked worktree（`.git` 是文件）。
 - **目录名 = 本地分支名 = 远程分支名**，三者必须一致。分支名沿用 Minecraft 完整版本串写法 `1.26.1.2`，jar 名与 tag 用真实版本串 `26.1.2`。
-- **远端**：目前只有本地仓库，尚未配置 remote。接入 GitHub 后统一叫 `origin`，推送用 `git push -u origin <分支名>`；不要留下没有 upstream 的游离分支。
+- **远端**：`origin` = <https://github.com/QLNPLUS/no-experience>（公开仓库），统一叫 `origin`，推送用 `git push -u origin <分支名>`；不要留下没有 upstream 的游离分支。**GitHub 默认分支是 `forge-1.20.1`**，不是 `main`——`release` 事件只会运行默认分支上的 workflow，默认分支换了就必须回头核对 `.github/workflows/publish-curseforge.yml`。
 - **漂移起点**：三条分支的共同祖先是初始提交 `26da7f5`。之后每条分支各自有一次平台适配提交，因此第一次跨分支 cherry-pick 预计会冲突——那是已知的平台差异被暴露，不是 cherry-pick 的缺陷。
 
 ## 迁移纪律（强制）
@@ -55,6 +55,7 @@
 | `neoforge-1.26.1.2` | Java 25 | JDK 25 | `C:\Program Files\Java\jdk-25.0.4.1` |
 
 - daemon 由各分支的 `gradle/gradle-daemon-jvm.properties` 指定，编译目标由 `java.toolchain` / `options.release` 指定，**两者都要对**。
+- launcher JVM **同样要对**：实测 PATH 上的 Oracle `javapath` 会把 launcher 抬到 JDK 25，Gradle 8.8 连不起来。两条 Gradle 8.8 分支跑 `gradlew` 前必须让 `JAVA_HOME` 指向 JDK 21，`neoforge-1.26.1.2` 指向 JDK 25。CI 里由 `actions/setup-java` 保证这一点。
 - 症状对照：`Unsupported class file major version 69` = 拿 JDK 25 跑了旧 Gradle；`No matching toolchains found` = 本机缺对应 JDK。
 - 不要在 `gradle.properties` 里写死 `org.gradle.java.home` 的绝对路径，换机器或换 CI 会直接失效。
 
@@ -77,7 +78,7 @@ $env:JAVA_TOOL_OPTIONS='-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=7897 -Dhttps
 5. 客户端不绘制经验条与等级数字；定位栏、坐骑跳跃条等其他 HUD 不受影响。
 6. 负向经验变化（附魔、铁砧扣等级）不拦截——等级本来就是 0，拦它没有意义，还会引入状态不一致。
 
-## Tag 格式
+## Tag 格式与发布流程
 
 `v<版本>-<加载器>-<mc版本>`，前缀统一带 `v`：
 
@@ -87,9 +88,32 @@ v1.0.0-neoforge-1.21.1
 v1.0.0-neoforge-26.1.2
 ```
 
+tag 打在**各自的版本分支**上（`v1.0.0-neoforge-1.21.1` 打在 `neoforge-1.21.1` 上）。三条分支的版本号各自独立，不要求锁步。
+
+发布一次：
+
+1. 在目标分支把 `gradle.properties` 的 `mod_version` 改成本次版本号，并在 `CHANGELOG.md` 顶部补一个同名的 `## <版本>` 小节。
+2. 提交、推送分支。
+3. 打 tag 并推送：`git tag v1.0.0-forge-1.20.1; git push origin v1.0.0-forge-1.20.1`。
+4. 在 GitHub 上针对该 tag 创建 Release 并发布（Published，不是 Draft）——这一步才触发发布 workflow。
+
+**tag 里的版本必须等于 `gradle.properties` 的 `mod_version`。** workflow 会断言 `build/libs/no_experience-<loader>-<mcversion>-<版本>.jar` 存在，对不上直接失败，不会传错文件。
+
 ## CI 契约
 
-目前仓库没有 GitHub Actions workflow。若以后添加：分支名 `forge-1.20.1` / `neoforge-1.21.1` / `neoforge-1.26.1.2`、jar 名 `no_experience-<loader>-<mcversion>-<version>.jar`、tag 格式都会被 workflow 引用；改名必须同步改 workflow。
+`.github/workflows/publish-curseforge.yml`，**三条分支内容逐字节相同**。默认分支上的那一份负责响应 `release` 事件（GitHub 只在默认分支上运行 release workflow），workflow 自己从 tag 判断该构建哪条分支：
+
+| tag | 构建的分支 | CurseForge loader | 编译目标 | 构建 JVM |
+|---|---|---|---|---|
+| `v<版本>-forge-1.20.1` | `forge-1.20.1` | `forge` | 17 | 21 |
+| `v<版本>-neoforge-1.21.1` | `neoforge-1.21.1` | `neoforge` | 21 | 21 |
+| `v<版本>-neoforge-26.1.2` | `neoforge-1.26.1.2` | `neoforge` | 25 | 25 |
+
+- **手动触发**：`workflow_dispatch` 需要 `tag` 输入；`loader` 选 `auto`（按 tag 判断）、`forge`、`neoforge`、`neoforge-126`（单个任务重试，不会重复上传已经成功的那一个）。`loader=auto` 且 tag 是不带加载器后缀的裸版本号（如 `v1.0.0`）时三个任务全跑，各自构建自己分支的头部提交。
+- **仓库配置**：变量 `CURSEFORGE_PROJECT_ID`（数字项目 ID）+ 机密 `CURSEFORGE_TOKEN`（CurseForge API token）。缺任意一个，workflow 在构建前就失败并给出提示。**token 不写进任何文件、日志或聊天。**
+- 上传文件名固定为 `no_experience-<loader>-<mcversion>-<版本>.jar`，CurseForge 版本名是 `No Experience <版本> (<加载器> <MC>)`。改名必须同步改 workflow。
+- 上传前会断言：jar 存在、归档根有 `pack.mcmeta`、元数据文件没残留 `${...}`；`CHANGELOG.md` 里没有对应版本小节同样直接失败。
+- **验证发布结果不要靠"公开文件列表里有没有新文件"**：CurseForge 审核期间文件对公开列表不可见，上传成功也可能几分钟内查不到，此时重试会造出重复文件。用文件总数对比（发布前数量 + 本次上传数量），并把 GitHub Release 的 assets 当作另一半证据。
 
 ## 每个分支的发布产物检查（必做）
 
