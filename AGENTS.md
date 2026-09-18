@@ -113,6 +113,10 @@ tag 打在**各自的版本分支**上（`v1.0.0-neoforge-1.21.1` 打在 `neofor
 - **仓库配置**：变量 `CURSEFORGE_PROJECT_ID`（数字项目 ID）+ 机密 `CURSEFORGE_TOKEN`（CurseForge API token）。缺任意一个，workflow 在构建前就失败并给出提示。**token 不写进任何文件、日志或聊天。**
 - 上传文件名固定为 `no_experience-<loader>-<mcversion>-<版本>.jar`，CurseForge 版本名是 `No Experience <版本> (<加载器> <MC>)`。改名必须同步改 workflow。
 - 上传前会断言：jar 存在、归档根有 `pack.mcmeta`、元数据文件没残留 `${...}`；`CHANGELOG.md` 里没有对应版本小节同样直接失败。
+- **两个只在 Linux 上暴露、本机永远不会发现的坑，已经踩过一次**（首次 CI 构建三个任务全挂）：
+  1. `gradlew` 必须带可执行位，提交模式要是 `100755`；`100644` 时 CI 报 `Permission denied` 并以 **exit 126** 结束。
+  2. `gradlew` 必须是 LF 换行；CRLF 的 shebang 在 Linux 上以 **exit 127**（`cannot execute: required file not found`）结束。
+  仓库根的 `.gitattributes` 已把 `gradlew` 与 `*.sh` 钉成 LF，但**可执行位不在它的管辖范围内**——动了 wrapper 之后用 `git ls-tree <分支> gradlew` 复查模式，两个值都要对。
 - **验证发布结果不要靠"公开文件列表里有没有新文件"**：CurseForge 审核期间文件对公开列表不可见，上传成功也可能几分钟内查不到，此时重试会造出重复文件。用文件总数对比（发布前数量 + 本次上传数量），并把 GitHub Release 的 assets 当作另一半证据。
 
 ## 每个分支的发布产物检查（必做）
